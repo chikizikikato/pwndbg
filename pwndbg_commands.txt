@@ -1,0 +1,39 @@
+
+
+distance a b
+leakfind addr --max_depth=3 --max_offset=... --page_name=filename
+probeleak addr count_to_search
+entry_point (print entry point)
+entry (start programm and halt at entry point)
+start (set breakpoint at 'main', 'start', 'init' using given symbols, otherwise at entry_point, and then run program)
+main = start
+sstart (set tbreak at __libc_start_main , then run the program)
+lm = vmmap
+cyclic lenght (create cyclic pattern)
+cyclic -l value (lookup offset)
+elfheader
+retaddr
+piebase (base addr of piebase)
+aslr (show current aslr status and turn it off/on)
+bt = k (backtrace)
+frame (show current frame)
+vis_heap_chunks
+search [-p/-s/..] pointer|string|...
+checksec
+canary
+rop
+ropper
+plt
+gotplt
+got
+breakrva
+demangle
+alias
+i vtbl
+i variables
+i functions
+i address "symbol_name" (get address for symbol name)
+starti (start programm anf halt at first instruction)
+whatis addr
+ptype type|expression
+dump binary memory filename addr_start addr_end

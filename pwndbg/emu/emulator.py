@@ -10,16 +10,20 @@ from __future__ import unicode_literals
 
 import binascii
 import re
+import math
 
 import capstone as C
 import gdb
 import unicorn as U
 
 import pwndbg.arch
+import pwndbg.abi
 import pwndbg.disasm
 import pwndbg.emu.emulator
 import pwndbg.memory
 import pwndbg.regs
+import pwndbg.symbol
+from pwndbg.color import message
 
 
 def parse_consts(u_consts):
@@ -114,7 +118,7 @@ e.until_jump()
 
 
 class Emulator(object):
-    def __init__(self):
+    def __init__(self, pc=None):
         self.arch = pwndbg.arch.current
 
         if self.arch not in arch_to_UC:
@@ -173,7 +177,8 @@ class Emulator(object):
         self.hook_add(U.UC_HOOK_INTR, self.hook_intr)
 
         # Map in the page that $pc is on
-        self.map_page(pwndbg.regs.pc)
+        pc_ = pc or pwndbg.regs.pc
+        self.map_page(pc_)
 
         # Instruction tracing
         if DEBUG:
@@ -214,13 +219,37 @@ class Emulator(object):
             mode |= U.UC_MODE_BIG_ENDIAN
 
         return mode
-
+        
+    def map_local_elf(self, filepath):
+        f = open(filepath, "rb")
+        blob = f.read()
+        f.close()
+        debug('len(blob): {0}'.format(hex(len(blob))))
+    	
+        pages = pwndbg.elf.map(0, objfile=filepath, blob=blob)
+        print("pages: {0}".format(pages))
+        for page in pages:
+            debug('offset: {0}'.format(str(hex(page.offset))))
+            debug('memsz: {0}'.format(hex(page.memsz)))
+            data = blob[page.offset:page.offset+page.memsz]
+            debug("uc.mem_map({0}, {1})".format(hex(page.start), hex(page.memsz)))
+            self.uc.mem_map(page.start, page.memsz)
+            debug("# Writing %#x bytes"% len(data))
+            debug("uc.mem_write({0}, ...)".format(hex(page.start)))
+            self.uc.mem_write(page.start, data)
+            
+    def map_local_stack(self, stack_size=pwndbg.memory.PAGE_SIZE, stack_start=pwndbg.memory.MMAP_MIN_ADDR):
+        sp_enum = self.get_reg_enum("stack")
+        debug("uc.mem_map({0}, {1})".format(hex(stack_start), hex(stack_size)))
+        self.uc.mem_map(stack_start, stack_size)
+        debug("uc.reg_write(sp, {0})".format(hex(stack_start+int(stack_size/2))))
+        self.uc.reg_write(sp_enum, stack_start+int(stack_size/2))
+    
     def map_page(self, page):
         page = pwndbg.memory.page_align(page)
         size = pwndbg.memory.PAGE_SIZE
 
         debug("# Mapping %#x-%#x" % (page, page+size))
-
         try:
             data = pwndbg.memory.read(page, size)
             data = bytes(data)
@@ -399,6 +428,22 @@ class Emulator(object):
             addr, target = self.until_jump(target)
 
         return addr, target
+        
+    def until_call_to(self, call_to_addresses, alternative_index_call=2, max_calls=100, pc=None):
+        target = pc
+        addr = pc
+        num_calls = 0
+        while(target not in call_to_addresses):
+            addr, target = self.until_call(pc=addr)
+            debug('CALL FOUND TO {0} FROM {1}'.format(hex(target), hex(addr)))
+            addr+=self._prev_size
+            num_calls+=1
+            if(not call_to_addresses and num_calls==alternative_index_calls):
+                print(message.notice("target call address not found. returning cause alternative index call={0}".format(str(alternative_index_call))))
+                break
+            if(num_calls>max_calls):
+                raise Exception("Max retrys to find __libc_start_main exceeded")
+        return addr, target
 
     def until_syscall(self, pc=None):
         """
@@ -464,7 +509,51 @@ class Emulator(object):
             name = 'U.x86_const.UC_X86_REG_%s' % reg.upper()
             value = self.uc.reg_read(enum)
             debug("uc.reg_read(%(name)s) ==> %(value)x" % locals())
+            
+    def get_argument(self, n, abi=None):
+        try:
+            abi = abi or pwndbg.abi.ABI.default()
+        except KeyError:
+            return None
+        regs = abi.register_arguments
+        
+        if(n < len(regs)):
+            return self.uc.reg_read(self.get_reg_enum(regs[n]))
+            
+        n -= len(regs)
+        
+        arg_addr = self.uc.reg_read(self.get_reg_enum("stack")) + ((n+1) * pwndbg.arch.ptrsize)
+        
+        arg = pwndbg.arch.unpack(self.mem_read(arg_addr, pwndbg.arch.ptrsize))
+        return arg
 
     def trace_hook(self, _uc, address, instruction_size, _user_data):
         data = binascii.hexlify(self.mem_read(address, instruction_size))
         debug("# trace_hook: %#-8x %r" % (address, data))
+        
+        
+        
+        
+        
+class FunctionArgumentGetter():
+    def __init__(self, start_address, target_function_name, argument_number, alternative_index_call=None, max_calls=100):
+	    self.start_address = start_address
+	    self.target_function_name = target_function_name
+	    self.argument_number = argument_number
+	    self.alternative_index_call = alternative_index_call
+	    self.max_calls = max_calls
+	    self.e = Emulator(pc=start_address)
+	    
+    def get_argument_of_target_function(self):
+	    self._map_local_if_not_alive()
+	    
+	    target_function_addresses = list(map(int, pwndbg.symbol.FunctionAddressFinder(self.target_function_name).find_addresses()))
+
+	    addr, target = self.e.until_call_to(target_function_addresses, alternative_index_call=self.alternative_index_call, pc=self.start_address, max_calls=self.max_calls)
+	    return self.e.get_argument(self.argument_number)
+
+    def _map_local_if_not_alive(self):
+	    if(not pwndbg.proc.alive):
+		    self.e.map_local_elf(pwndbg.proc.exe)
+		    self.e.map_local_stack()        
+

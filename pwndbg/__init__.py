@@ -55,6 +55,7 @@ import pwndbg.commands.vmmap
 import pwndbg.commands.windbg
 import pwndbg.commands.xinfo
 import pwndbg.commands.xor
+import pwndbg.commands.mainaddr
 import pwndbg.constants
 import pwndbg.disasm
 import pwndbg.disasm.arm
@@ -122,7 +123,8 @@ __all__ = [
 'symbol',
 'typeinfo',
 'ui',
-'vmmap'
+'vmmap',
+'mainaddr'
 ]
 
 pwndbg.prompt.set_prompt()

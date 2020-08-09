@@ -298,7 +298,7 @@ class module(ModuleType):
 
             value = int(value)
             return value & pwndbg.arch.ptrmask
-        except (ValueError, gdb.error):
+        except (ValueError, AttributeError, gdb.error):
             return None
 
     @pwndbg.memoize.reset_on_stop

@@ -13,7 +13,15 @@ import gdb
 import pwndbg.auxv
 import pwndbg.commands
 import pwndbg.vmmap
+import pwndbg.elf
 
+
+class PIEChecker():
+	def __init__(self, filepath=None):
+		self.filepath = (filepath if(filepath is not None) else get_exe_name())
+	
+	def is_pie(self):
+		return pwndbg.elf.get_elf_info(self.filepath).is_pie
 
 def get_exe_name():
     """

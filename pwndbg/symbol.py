@@ -35,6 +35,10 @@ import pwndbg.qemu
 import pwndbg.remote
 import pwndbg.stack
 import pwndbg.vmmap
+import pwndbg.proc
+import pwndbg.gdbutils.vars
+import pwndbg.chain
+from pwndbg.color import message, hexdump, context
 
 
 def get_directory():
@@ -215,13 +219,12 @@ def address(symbol):
     try:
         result = gdb.execute('info address %s' % symbol, to_string=True, from_tty=False)
         address = int(re.search('0x[0-9a-fA-F]+', result).group(), 0)
-
         # The address found should lie in one of the memory maps
         # There are cases when GDB shows offsets e.g.:
         # pwndbg> info address tcache
         # Symbol "tcache" is a thread-local variable at offset 0x40
         # in the thread-local storage for `/lib/x86_64-linux-gnu/libc.so.6'.
-        if not pwndbg.vmmap.find(address):
+        if((('offset' in result) and (not pwndbg.vmmap.find(address))) or ('multi-location' in result)):
             return None
 
         return address
@@ -267,6 +270,112 @@ def add_main_exe_to_symbols():
             gdb.execute('add-symbol-file %s %#x' % (path, addr), from_tty=False, to_string=True)
         except gdb.error:
             pass
+
+
+
+class Address():
+    def __init__(self, addr):
+        self.addr = addr
+        
+    def __int__(self):
+        return int(self.addr)
+
+class AddressOffset():
+    def __init__(self, offset):
+	    self.offset = offset
+
+    def __int__(self):
+        return int(self.offset)
+        
+    @classmethod
+    def from_address(cls, addr):
+	    prev_addr_page = pwndbg.memory.round_down(addr, pwndbg.memory.PAGE_SIZE)
+	    offset = addr- prev_addr_page
+	    return cls(offset)
+
+
+class AbstractSymbol():
+    def __init__(self, offset, addr, symbol_name):
+	    self.offset = offset
+	    self.addr = addr
+	    self.symbol_name = symbol_name
+	    
+    @property
+    def best_addr(self): #TODO: Refactor
+        if(self.addr):
+            return self.addr
+        elif(self.offset):
+            return self.offset
+        return None
+
+
+class NoSymbol(AbstractSymbol):
+    def __init__(self, symbol_name):
+        super().__init__(None, None, symbol_name)
+        
+    def print_symbol(self):
+	    pass
+
+class Symbol(AbstractSymbol):
+    def print_symbol(self):
+	    if(self.addr is not None):
+		    print("{0} addr: {1}".format(hexdump.special(self.symbol_name), pwndbg.chain.format(int(self.addr))))
+	    if(self.offset is not None):
+		    print("offset: {0}".format(context.banner(hex(int(self.offset)))))
+		    
+    @classmethod
+    def from_whole_address(cls, addr, symbol_name):
+	    return cls(AddressOffset.from_address(addr), Address(addr), symbol_name)
+
+class SymbolFactory():
+    def __init__(self, symbol_name):
+        self.symbol_name = symbol_name
+        self.symbol = NoSymbol(symbol_name)
+        
+    def create_symbol(self):
+        addr = address(self.symbol_name)
+        self._try_create_from_var()
+        if(addr is not None):
+            self._check_for_offset(addr)
+            self._check_for_whole_address(addr)
+        #TODO: Maybe retrieve offset from elf?!
+        return self.symbol
+        
+    def _check_for_offset(self, addr):
+        if(addr < pwndbg.memory.PAGE_SIZE):
+            self.symbol = Symbol(AddressOffset(addr), None, self.symbol_name)
+        
+    def _check_for_whole_address(self, addr):
+        if(addr > pwndbg.memory.PAGE_SIZE):
+            self.symbol = Symbol.from_whole_address(addr, self.symbol_name)
+	        
+    def _try_create_from_var(self):
+        if(pwndbg.vmmap.check_aslr() and not pwndbg.proc.alive):
+            print(message.notice("ASLR is enabled, so address can always change"))
+            return
+        var = pwndbg.gdbutils.vars.GDBVariableAPI.get_address(self.symbol_name)
+        if(var):
+	        self.symbol = Symbol.from_whole_address(var, self.symbol_name)
+
+class FunctionAddressFinder():
+    def __init__(self, function_name, extra_prefixes=None, extra_suffixes=None):
+        self.function_name = function_name
+        self.possible_addrs = list()
+        self.prefixes = [''] + (extra_prefixes or list())
+        self.suffixes = ['', '@plt', '@got.plt'] + (extra_suffixes or list())
+        
+    def find_addresses(self):
+        possible_addrs = list()
+        for suffix in self.suffixes:
+	        for prefix in self.prefixes:
+		        self._lookup_function_symbol(prefix+self.function_name+suffix)
+        return self.possible_addrs
+        
+    def _lookup_function_symbol(self, symbol_name):
+        symbol = SymbolFactory(symbol_name).create_symbol()
+        if(symbol.best_addr):
+	        self.possible_addrs.append(symbol.best_addr)
+
 
 if '/usr/lib/debug' not in get_directory():
     set_directory(get_directory() + ':/usr/lib/debug')

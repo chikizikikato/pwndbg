@@ -185,6 +185,15 @@ def exe():
     if e:
         return load(e)
 
+@pwndbg.memoize.reset_on_start
+def get_entry_point_addr_local():
+    filepath = pwndbg.proc.exe
+    if(not filepath):
+        return None
+    elf_info = pwndbg.elf.get_elf_info(filepath)
+    entry = int(elf_info.header.get("e_entry", None))
+    if(entry):
+        return entry
 
 @pwndbg.proc.OnlyWhenRunning
 @pwndbg.memoize.reset_on_start
@@ -233,7 +242,7 @@ def reset_ehdr_type_loaded():
 
 
 @pwndbg.abi.LinuxOnly()
-def find_elf_magic(pointer, max_pages=1024, search_down=False, ret_addr_anyway=False):
+def find_elf_magic(pointer, max_pages=1024, search_down=False, ret_addr_anyway=False, blob=None):
     """Search the nearest page which contains the ELF headers
     by comparing the ELF magic with first 4 bytes.
 
@@ -259,7 +268,7 @@ def find_elf_magic(pointer, max_pages=1024, search_down=False, ret_addr_anyway=F
             return None
 
         try:
-            data = pwndbg.memory.read(addr, 4)
+            data = (blob[addr:addr+4] if(blob is not None) else pwndbg.memory.read(addr, 4))
         except gdb.MemoryError:
             return addr if ret_addr_anyway else None
 
@@ -272,7 +281,8 @@ def find_elf_magic(pointer, max_pages=1024, search_down=False, ret_addr_anyway=F
     return addr if ret_addr_anyway else None
 
 
-def get_ehdr(pointer):
+
+def get_ehdr(pointer, blob=None):
     """Returns an ehdr object for the ELF pointer points into.
     """
     # Align down to a page boundary, and scan until we find
@@ -281,27 +291,27 @@ def get_ehdr(pointer):
 
     # For non linux ABI, the ELF header may not be found in memory.
     # This will hang the gdb when using the remote gdbserver to scan 1024 pages
-    base = find_elf_magic(pointer, search_down=True)
+    base = find_elf_magic(pointer, search_down=True, blob=blob)
     if base is None:
         if pwndbg.abi.linux:
             print("ERROR: Could not find ELF base!")
         return None, None
 
     # Determine whether it's 32- or 64-bit
-    ei_class = pwndbg.memory.byte(base+4)
+    ei_class = (blob[base+4] if(blob is not None) else pwndbg.memory.byte(base+4))
 
     # Find out where the section headers start
-    Elfhdr   = read(Ehdr, base)
+    Elfhdr   = read(Ehdr, base, blob=blob)
     return ei_class, Elfhdr
 
 
-def get_phdrs(pointer):
+def get_phdrs(pointer, blob=None):
     """
     Returns a tuple containing (phnum, phentsize, gdb.Value),
     where the gdb.Value object is an ELF Program Header with
     the architecture-appropriate structure type.
     """
-    ei_class, Elfhdr = get_ehdr(pointer)
+    ei_class, Elfhdr = get_ehdr(pointer, blob=blob)
 
     if Elfhdr is None:
         return (0, 0, None)
@@ -310,15 +320,15 @@ def get_phdrs(pointer):
     phoff     = Elfhdr.e_phoff
     phentsize = Elfhdr.e_phentsize
 
-    x = (phnum, phentsize, read(Phdr, Elfhdr.address + phoff))
+    x = (phnum, phentsize, read(Phdr, Elfhdr.address + phoff, blob=blob))
     return x
 
 
-def iter_phdrs(ehdr):
+def iter_phdrs(ehdr, blob=None):
     if not ehdr:
         return
 
-    phnum, phentsize, phdr = get_phdrs(ehdr.address)
+    phnum, phentsize, phdr = get_phdrs(ehdr.address, blob=blob)
 
     if not phdr:
         return
@@ -328,11 +338,11 @@ def iter_phdrs(ehdr):
 
     for i in range(0, phnum):
         p_phdr = int(first_phdr + (i*phentsize))
-        p_phdr = read(PhdrType, p_phdr)
+        p_phdr = read(PhdrType, p_phdr, blob=blob)
         yield p_phdr
 
 
-def map(pointer, objfile=''):
+def map(pointer, objfile='', blob=None):
     """
     Given a pointer into an ELF module, return a list of all loaded
     sections in the ELF.
@@ -352,11 +362,10 @@ def map(pointer, objfile=''):
          Page('7ffff79a2000-7ffff79a6000 r--p 0x4000 1bb000'),
          Page('7ffff79a6000-7ffff79ad000 rw-p 0x7000 1bf000')]
     """
-    ei_class, ehdr         = get_ehdr(pointer)
-    return map_inner(ei_class, ehdr, objfile)
+    ei_class, ehdr         = get_ehdr(pointer, blob=blob)
+    return map_inner(ei_class, ehdr, objfile, blob=blob)
 
-
-def map_inner(ei_class, ehdr, objfile):
+def map_inner(ei_class, ehdr, objfile, blob=None):
     if not ehdr:
         return []
 
@@ -370,7 +379,7 @@ def map_inner(ei_class, ehdr, objfile):
     # which change page permissions (e.g. PT_GNU_RELRO) will
     # override their small subset of address space.
     pages = []
-    for phdr in iter_phdrs(ehdr):
+    for phdr in iter_phdrs(ehdr, blob=blob):
         memsz   = int(phdr.p_memsz)
 
         if not memsz:
@@ -407,14 +416,15 @@ def map_inner(ei_class, ehdr, objfile):
             page.vaddr += base
 
     # Merge contiguous sections of memory together
-    pages.sort()
-    prev = pages[0]
-    for page in list(pages[1:]):
-        if (prev.flags & PF_W) == (page.flags & PF_W) and prev.vaddr+prev.memsz == page.vaddr:
-            prev.memsz += page.memsz
-            pages.remove(page)
-        else:
-            prev = page
+    if(pages):
+        pages.sort()
+        prev = pages[0]
+        for page in list(pages[1:]):
+            if (prev.flags & PF_W) == (page.flags & PF_W) and prev.vaddr+prev.memsz == page.vaddr:
+                prev.memsz += page.memsz
+                pages.remove(page)
+            else:
+                prev = page
 
     # Fill in any gaps with no-access pages.
     # This is what the linker does, and what all the '---p' pages are.
