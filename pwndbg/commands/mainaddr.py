@@ -73,13 +73,15 @@ class FileHandlerFactory():
 			return PIEHandler()
 
 @pwndbg.commands.ArgparsedCommand("print address of 'main' function")
+@pwndbg.commands.OnlyWithFile
 def mainaddr():
 	file_handler = FileHandlerFactory.get_handler()
 	main_symbol = file_handler.get_symbol()
 	main_symbol.print_symbol()
 
 @pwndbg.commands.ArgparsedCommand("sets breakpoint at start of 'main' function")
-def bmain(): #TODO: Error when breaking with main_symbol.best_addr=None
+@pwndbg.commands.OnlyWithFile
+def bmain():
 	file_handler = FileHandlerFactory.get_handler()
 	main_symbol = file_handler.get_symbol()
 	breakpoint_addr = main_symbol.best_addr
